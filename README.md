@@ -1,2 +1,0 @@
-# ambroh
-exam analytics
