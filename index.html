@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+<head><link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1e90ff">
+<link rel="apple-touch-icon" href="icon-192.png">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
 <title>AMBROH — Online Examination Analysis System · Primary &amp; Junior School</title>
@@ -6844,6 +6846,41 @@ let INIT_REPAIRED=0;
   if(DB_FAILED) reportDbError({name:'Unavailable'});
   else if(INIT_REPAIRED>0) problem('Some saved information was damaged, and AMBROH repaired it so you can carry on.','Check your learners, subjects and marks look right. If something is missing, open Backup & Restore and restore your latest backup.',null,'Saved data repaired');
 })();
+</script><footer style="background:#0a1128;color:#fff;text-align:center;padding:20px;margin-top:40px;">
+  <p style="margin:8px 0;">📞 Call/SMS: <a href="tel:+254715855688" style="color:#4da6ff;">0715 855 688</a></p>
+  <p style="margin:8px 0;">
+    <a href="https://wa.me/254715855688" target="_blank" style="color:#25D366;text-decoration:none;font-weight:bold;">
+      💬 Chat on WhatsApp
+    </a>
+  </p>
+  <button id="installBtn" style="display:none;margin-top:12px;padding:10px 20px;background:#1e90ff;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer;">
+    ⬇️ Install App
+  </button>
+</footer>
+
+<script>
+  // Register service worker (enables installability)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js');
+  }
+
+  // Show install button when browser is ready to prompt
+  let deferredPrompt;
+  const installBtn = document.getElementById('installBtn');
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    installBtn.style.display = 'inline-block';
+  });
+
+  installBtn.addEventListener('click', async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    installBtn.style.display = 'none';
+  });
 </script>
 </body>
 </html>
