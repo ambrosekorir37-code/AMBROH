@@ -371,6 +371,40 @@ async function dbSet(key,value){
   const {error}=await dbHandle.from(KV_TABLE).upsert({key,value,updated_at:new Date().toISOString()});
   if(error) throw error;
 }
+/* ---- Per-school storage split ----
+   Each school's own academic records (classes, streams, subjects, students,
+   exams) are saved under their OWN row: key = 'school_<schoolId>'. This
+   means one school's save can never overwrite another school's rows, and
+   each school's data is a physically separate record in Supabase.
+   Platform-wide things that must be visible across every school (the schools
+   registry itself, user accounts, audit log, teacher class access, school
+   subscriptions, legacy settings) stay together in one shared row: key =
+   'platform'. DATA in memory is still one combined object, assembled from
+   the platform row + every school row at load time, so none of the
+   thousands of existing DATA.* call sites need to change. */
+const ACADEMIC_KEYS=['classes','streams','subjects','students','exams'];
+function schoolRowKey(schoolId){ return 'school_'+schoolId; }
+function buildPlatformPayload(){
+  return {
+    schools:DATA.schools||[],
+    users:DATA.users||[],
+    auditLogs:DATA.auditLogs||[],
+    teacherClassAccess:DATA.teacherClassAccess||[],
+    schoolClassSubs:DATA.schoolClassSubs||[],
+    settings:DATA.settings||blankData().settings
+  };
+}
+function buildSchoolPayload(schoolId){
+  const out={};
+  ACADEMIC_KEYS.forEach(k=>{ out[k]=(DATA[k]||[]).filter(r=>r&&r.schoolId===schoolId); });
+  return out;
+}
+/** Writes the shared platform row plus every school's own row. */
+function saveSplitData(){
+  if(!dbHandle){ reportDbError({name:'Unavailable'}); return; }
+  safeSave('platform', buildPlatformPayload());
+  (DATA.schools||[]).forEach(sch=>{ safeSave(schoolRowKey(sch.id), buildSchoolPayload(sch.id)); });
+}
 
 /* ============================= APP STATE ============================= */
 // AMBROH supports Primary (Grades 1–6), Junior (Grades 7–9), or Both.
@@ -453,13 +487,13 @@ let saveTimer=null;
 function persist(){
   syncSettingsToCurrentSchool();
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(()=>{ safeSave('data',DATA); },250);
+  saveTimer=setTimeout(()=>{ saveSplitData(); },250);
 }
 /** Flush immediately (school registration, password changes) so login works after logout/refresh */
 function persistNow(){
   syncSettingsToCurrentSchool();
   clearTimeout(saveTimer);
-  safeSave('data', DATA);
+  saveSplitData();
 }
 /** DATA.settings is a per-session working copy built from the open school's own
  *  settings (see applySchoolContext). Any edit made through it — ranking, grading
@@ -6846,11 +6880,31 @@ let INIT_REPAIRED=0;
 (async function init(){
   try{
     dbHandle=await openDB();
-    const saved=await dbGet('data');
-    if(saved){
-      DATA=Object.assign(blankData(), saved);
-      DATA.settings=Object.assign(blankData().settings, saved.settings||{});
-      DATA.users=saved.users||[];
+    const platform=await dbGet('platform');
+    if(platform){
+      // New split storage: shared platform row + one row per school.
+      DATA=blankData();
+      DATA.schools=platform.schools||[];
+      DATA.users=platform.users||[];
+      DATA.auditLogs=platform.auditLogs||[];
+      DATA.teacherClassAccess=platform.teacherClassAccess||[];
+      DATA.schoolClassSubs=platform.schoolClassSubs||[];
+      DATA.settings=Object.assign(blankData().settings, platform.settings||{});
+      for(const sch of DATA.schools){
+        let sd;
+        try{ sd=await dbGet(schoolRowKey(sch.id)); }catch(err){ sd=null; }
+        if(sd){ ACADEMIC_KEYS.forEach(k=>{ DATA[k]=(DATA[k]||[]).concat(sd[k]||[]); }); }
+      }
+    } else {
+      // Legacy fallback: pre-split installs kept everything in one 'data' row.
+      // Loaded once here, then the very next save (further down in init, or
+      // any edit after) writes it back out in the new split shape.
+      const saved=await dbGet('data');
+      if(saved){
+        DATA=Object.assign(blankData(), saved);
+        DATA.settings=Object.assign(blankData().settings, saved.settings||{});
+        DATA.users=saved.users||[];
+      }
     }
     INIT_REPAIRED=repairData();
   }catch(err){ console.error('Supabase storage unavailable, using in-memory session only.',err); DB_FAILED=true; dbHandle=null; }
