@@ -1340,23 +1340,31 @@ function teacherHasPaidClass(classId,u){
   if(!u) return false;
   return accessRecordsForTeacher(u.id).some(a=>a.classId===classId && isAccessActive(a));
 }
+function teacherClassSubjectRecord(u,classId){ return (u && u.classSubjects) ? u.classSubjects[classId] : null; }
 function teachingClassIds(u){
   u=u||CURRENT_USER;
   const ids=new Set();
   if(!u || !isTeacher(u) || !u.schoolId) return ids;
-  const hasSubjects = u.allSubjects===true || (Array.isArray(u.subjectIds) && u.subjectIds.length>0);
-  if(!hasSubjects) return ids;
+  if(u.allSubjects===true && u.allClasses===true){
+    (DATA.classes||[]).filter(c=>c.schoolId===u.schoolId).forEach(c=>ids.add(c.id));
+    return ids;
+  }
+  const cs=u.classSubjects||{};
   (DATA.classes||[]).filter(c=>c.schoolId===u.schoolId).forEach(c=>{
-    if(u.allClasses===true || (Array.isArray(u.classIds) && u.classIds.includes(c.id))) ids.add(c.id);
+    const rec=cs[c.id];
+    if(rec && (rec.all===true || (Array.isArray(rec.subjects) && rec.subjects.length>0))) ids.add(c.id);
   });
   return ids;
 }
 function canEnterSubject(subjectId,classId,u){
   u=u||CURRENT_USER;
   if(!u || !isTeacher(u)) return true;
-  if(teacherHasPaidClass(classId,u)) return true;            // paid class = all subjects
-  if(!teachingClassIds(u).has(classId)) return false;        // not one of their classes
-  return u.allSubjects===true || (Array.isArray(u.subjectIds) && u.subjectIds.includes(subjectId));
+  if(teacherHasPaidClass(classId,u)) return true;
+  if(u.allSubjects===true && u.allClasses===true) return true;
+  const rec=teacherClassSubjectRecord(u,classId);
+  if(!rec) return false;
+  if(rec.all===true) return true;
+  return Array.isArray(rec.subjects) && rec.subjects.includes(subjectId);
 }
 /** Classes whose analysis and reports the current user may open / print. */
 function reportClassIds(){
@@ -3851,23 +3859,24 @@ function canManageUser(target){
   if(!isSchoolAdmin(CURRENT_USER) || target.role!=='teacher' || !target.schoolId || target.schoolId!==CURRENT_USER.schoolId) return false;
   const grades=schoolAdminAllowedGrades(CURRENT_USER);
   if(!grades) return true;
-  const cls=Array.isArray(target.classIds)?target.classIds.map(anyClassById).filter(Boolean):[];
+  const cls=Object.keys(target.classSubjects||{}).map(anyClassById).filter(Boolean);
   const paid=accessRecordsForTeacher(target.id).map(a=>anyClassById(a.classId)).filter(Boolean);
   const allCls=[...cls,...paid];
-  if(target.allClasses===true || !allCls.length) return true;
+  if((target.allSubjects===true && target.allClasses===true) || !allCls.length) return true;
   return allCls.some(c=>grades.includes(gradeNumberOfClass(c)));
 }
 function teacherSubjectsLabel(u){
   if(!u || u.role!=='teacher') return '—';
-  let subj;
-  if(u.allSubjects===true) subj='All subjects';
-  else if(Array.isArray(u.subjectIds) && u.subjectIds.length) subj=u.subjectIds.map(id=>(DATA.subjects||[]).find(x=>x.id===id)).filter(Boolean).map(x=>x.name).join(', ');
-  else return 'No subjects assigned yet';
-  let cls;
-  if(u.allClasses===true) cls='all classes';
-  else if(Array.isArray(u.classIds) && u.classIds.length) cls=u.classIds.map(id=>(DATA.classes||[]).find(x=>x.id===id)).filter(Boolean).sort((a,b)=>gradeNumberOfClass(a)-gradeNumberOfClass(b)).map(x=>x.name).join(', ');
-  else cls='no classes yet';
-  return subj+' — '+cls;
+  if(u.allSubjects===true && u.allClasses===true) return 'All subjects — all classes';
+  const cs=u.classSubjects||{};
+  const classIds=Object.keys(cs).filter(cid=>cs[cid] && (cs[cid].all===true || (Array.isArray(cs[cid].subjects)&&cs[cid].subjects.length)));
+  if(!classIds.length) return 'No subjects assigned yet';
+  const rows=classIds.map(cid=>({c:(DATA.classes||[]).find(x=>x.id===cid), rec:cs[cid]})).filter(r=>r.c)
+    .sort((a,b)=>gradeNumberOfClass(a.c)-gradeNumberOfClass(b.c));
+  return rows.map(r=>{
+    const subjLabel=r.rec.all===true?'All subjects':(r.rec.subjects||[]).map(id=>(DATA.subjects||[]).find(x=>x.id===id)).filter(Boolean).map(x=>x.name).join(', ');
+    return r.c.name+': '+(subjLabel||'—');
+  }).join(' · ');
 }
 function viewUsers(){
   const wrap=el(`<div></div>`);
@@ -3885,11 +3894,11 @@ function viewUsers(){
   const grades=schoolAdminAllowedGrades(CURRENT_USER); // null = no section restriction
   const teacherInScope=u=>{
     if(!grades) return true;
-    const cls=Array.isArray(u.classIds)?u.classIds.map(anyClassById).filter(Boolean):[];
+    const cls=Object.keys(u.classSubjects||{}).map(anyClassById).filter(Boolean);
     const paid=accessRecordsForTeacher(u.id).map(a=>anyClassById(a.classId)).filter(Boolean);
     const allCls=[...cls,...paid];
-    if(u.allClasses===true) return true; // "all classes" ticked — admin should still be able to see/manage them
-    if(!allCls.length) return true; // not yet assigned to any class — either admin may pick them up
+    if(u.allSubjects===true && u.allClasses===true) return true;
+    if(!allCls.length) return true;
     return allCls.some(c=>grades.includes(gradeNumberOfClass(c)));
   };
   const list=superView ? [...DATA.users] : (DATA.users||[]).filter(u=>u.role==='teacher' && u.schoolId===CURRENT_USER.schoolId && teacherInScope(u));
@@ -3918,7 +3927,9 @@ function viewUsers(){
   const p=el(`<div class="panel"></div>`); p.appendChild(tbl); wrap.appendChild(p);
   return wrap;
 }
-/** Subjects and classes a teacher teaches. A class the teacher has PAID for opens all its subjects regardless of this list. */
+/** Subjects and classes a teacher teaches, assigned PER CLASS — ticking English for Grade 7 does not
+ *  give that teacher English in Grade 8. A class the teacher has PAID for opens all its subjects
+ *  regardless of this grid. */
 function modalTeacherSubjects(teacherId){
   const t=userById(teacherId);
   if(!t || t.role!=='teacher' || !canManageUser(t)){ toast('You cannot change this teacher'); return; }
@@ -3930,32 +3941,53 @@ function modalTeacherSubjects(teacherId){
       <div class="modal-foot"><button class="btn" data-close>Close</button></div>`);
     return;
   }
-  const allSubOn=t.allSubjects===true, allClsOn=t.allClasses===true;
-  const selS=new Set(Array.isArray(t.subjectIds)?t.subjectIds:[]), selC=new Set(Array.isArray(t.classIds)?t.classIds:[]);
-  const block=(title,masterId,masterLabel,cls,items,sel,allOn)=>`
-    <h3 style="margin:12px 0 6px;font-size:14px;">${title}</h3>
-    <div class="checkline" style="margin-bottom:6px;"><input type="checkbox" id="${masterId}" ${allOn?'checked':''}><strong>${masterLabel}</strong></div>
-    <div style="max-height:22vh; overflow:auto;">${items.map(x=>`<div class="checkline"><input type="checkbox" class="${cls}" value="${x.id}" ${allOn||sel.has(x.id)?'checked':''} ${allOn?'disabled':''}><span>${esc(x.name)}${x.code?' <span class="small">('+esc(x.code)+')</span>':''}</span></div>`).join('')}</div>`;
+  const masterOn = t.allSubjects===true && t.allClasses===true;
+  const cs = t.classSubjects || {};
+  const classBlock = !classes.length ? `<p class="small">No classes yet.</p>` : classes.map(c=>{
+    const rec=cs[c.id]||{};
+    const allOn=rec.all===true;
+    const selSet=new Set(Array.isArray(rec.subjects)?rec.subjects:[]);
+    const rows=subs.map(s=>`<div class="checkline"><input type="checkbox" class="cs-sub" data-class="${c.id}" value="${s.id}" ${allOn||selSet.has(s.id)?'checked':''} ${allOn?'disabled':''}><span>${esc(s.name)}${s.code?' <span class="small">('+esc(s.code)+')</span>':''}</span></div>`).join('');
+    return `<div class="panel" style="margin-bottom:10px;padding:12px 14px;">
+      <h3 style="margin:0 0 8px;font-size:14px;">${esc(c.name)}</h3>
+      <div class="checkline" style="margin-bottom:6px;"><input type="checkbox" class="cs-all" data-class="${c.id}" ${allOn?'checked':''}><strong>All subjects in ${esc(c.name)}</strong></div>
+      <div style="max-height:18vh; overflow:auto;">${rows}</div>
+    </div>`;
+  }).join('');
   openModal(`
     <div class="modal-head"><h2>Subjects and classes — ${esc(t.name)}</h2><button class="x" data-close>✕</button></div>
-    <div class="hint">${esc(t.name)} can enter and upload marks for the ticked subjects in the ticked classes. If a class is <strong>paid</strong> for this teacher (Class Access), they get <strong>all subjects</strong> in that class — for marks upload and report printing — whatever is ticked here.</div>
-    ${block('Subjects they teach','ts-all','All subjects (including any added later)','ts-chk',subs,selS,allSubOn)}
-    ${block('Classes they teach','tc-all','All classes','tc-chk',classes,selC,allClsOn)}
+    <div class="hint">Tick exactly which subjects ${esc(t.name)} teaches, class by class. A subject ticked for one class does not carry over to another class. If a class is <strong>paid</strong> for this teacher (Class Access), they get <strong>all subjects</strong> in that class — for marks upload and report printing — regardless of what's ticked here.</div>
+    <div class="checkline" style="margin:10px 0;"><input type="checkbox" id="ts-master" ${masterOn?'checked':''}><strong>No restriction — this teacher can access every class and subject</strong></div>
+    <div id="ts-grid" style="${masterOn?'display:none;':''}">${classBlock}</div>
     <div class="modal-foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="ts-save">Save</button></div>
   `);
-  const wire=(masterId,cls)=>{
-    const m=document.getElementById(masterId);
-    m.addEventListener('change',()=>{ document.querySelectorAll('.'+cls).forEach(b=>{ b.checked=m.checked||b.checked; b.disabled=m.checked; }); });
-    return m;
-  };
-  const mS=wire('ts-all','ts-chk'), mC=wire('tc-all','tc-chk');
+  const master=document.getElementById('ts-master'), grid=document.getElementById('ts-grid');
+  master.addEventListener('change',()=>{ grid.style.display=master.checked?'none':''; });
+  classes.forEach(c=>{
+    const m=document.querySelector(`.cs-all[data-class="${c.id}"]`);
+    if(!m) return;
+    m.addEventListener('change',()=>{
+      document.querySelectorAll(`.cs-sub[data-class="${c.id}"]`).forEach(b=>{ b.checked=m.checked||b.checked; b.disabled=m.checked; });
+    });
+  });
   document.getElementById('ts-save').onclick=()=>{
-    const chk=cls=>[...document.querySelectorAll('.'+cls)].filter(b=>b.checked).map(b=>b.value);
-    t.allSubjects=mS.checked; t.subjectIds= mS.checked ? subs.map(x=>x.id) : chk('ts-chk');
-    t.allClasses=mC.checked;  t.classIds  = mC.checked ? classes.map(x=>x.id) : chk('tc-chk');
-    audit('teacher_subjects_set',{schoolId:t.schoolId,teacherId:t.id,teacher:t.name,allSubjects:t.allSubjects,subjects:t.subjectIds.length,allClasses:t.allClasses,classes:t.classIds.length});
+    if(master.checked){
+      t.allSubjects=true; t.allClasses=true;
+    } else {
+      t.allSubjects=false; t.allClasses=false;
+      const newCS={};
+      classes.forEach(c=>{
+        const allChk=document.querySelector(`.cs-all[data-class="${c.id}"]`);
+        const subChks=[...document.querySelectorAll(`.cs-sub[data-class="${c.id}"]`)].filter(b=>b.checked).map(b=>b.value);
+        if(allChk && allChk.checked) newCS[c.id]={all:true};
+        else if(subChks.length) newCS[c.id]={all:false, subjects:subChks};
+      });
+      t.classSubjects=newCS;
+    }
+    const classCount=master.checked?classes.length:Object.keys(t.classSubjects||{}).length;
+    audit('teacher_subjects_set',{schoolId:t.schoolId,teacherId:t.id,teacher:t.name,allSubjects:t.allSubjects,allClasses:t.allClasses,classCount});
     persistNow(); closeModal(); render();
-    if(!t.subjectIds.length || !t.classIds.length) toast('Saved — '+t.name+' needs at least one subject and one class (or a paid class) to enter marks');
+    if(!classCount) toast('Saved — '+t.name+' needs at least one subject ticked in a class (or a paid class) to enter marks');
     else toast('Subjects and classes saved for '+t.name);
   };
 }
@@ -6406,6 +6438,22 @@ function repairData(){
   scopedExams().forEach(e=>{
     if(!e.results || typeof e.results!=='object'){ e.results={}; fixed++; }
     if(!Array.isArray(e.subjects)){ e.subjects=[]; fixed++; }
+  });
+  (DATA.users||[]).forEach(u=>{
+    if(u.role!=='teacher' || u.classSubjects) return;
+    const hadAllSubjects=u.allSubjects===true, hadAllClasses=u.allClasses===true;
+    const oldSubjectIds=Array.isArray(u.subjectIds)?u.subjectIds:[];
+    const oldClassIds=Array.isArray(u.classIds)?u.classIds:[];
+    if(hadAllSubjects && hadAllClasses){ u.classSubjects={}; fixed++; return; }
+    const classIdsToUse = hadAllClasses ? (DATA.classes||[]).filter(c=>c.schoolId===u.schoolId).map(c=>c.id) : oldClassIds;
+    const cs={};
+    classIdsToUse.forEach(cid=>{
+      if(hadAllSubjects) cs[cid]={all:true};
+      else if(oldSubjectIds.length) cs[cid]={all:false, subjects:oldSubjectIds.slice()};
+    });
+    u.classSubjects=cs;
+    u.allSubjects=false; u.allClasses=false;
+    fixed++;
   });
   return fixed;
 }
